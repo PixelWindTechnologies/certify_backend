@@ -1,5 +1,4 @@
 """add roll number to enrollments
-
 Revision ID: 0005_add_roll_number_to_enrollments
 Revises: 0004_add_training_type_to_enrollments
 Create Date: 2026-06-28
@@ -14,11 +13,26 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "enrollments",
-        sa.Column("roll_number", sa.String(50), nullable=True),
-    )
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='enrollments' AND column_name='roll_number'
+            ) THEN
+                ALTER TABLE enrollments ADD COLUMN roll_number VARCHAR(50);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade():
-    op.drop_column("enrollments", "roll_number")
+    op.execute("""
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='enrollments' AND column_name='roll_number'
+            ) THEN
+                ALTER TABLE enrollments DROP COLUMN roll_number;
+            END IF;
+        END $$;
+    """)
