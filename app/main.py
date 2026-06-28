@@ -19,7 +19,25 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.services.certificate_job import generate_pending_certificates
+from app.scripts.seed import run as seed_db
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Path(settings.LOCAL_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
+    
+    # Seed database on startup
+    seed_db()
+    
+    scheduler.add_job(
+        generate_pending_certificates,
+        "interval",
+        seconds=settings.CERTIFICATE_JOB_INTERVAL_SECONDS,
+        id="certificate_generation_job",
+        replace_existing=True,
+    )
+    scheduler.start()
+    yield
+    scheduler.shutdown(wait=False)
 scheduler = BackgroundScheduler()
 
 
