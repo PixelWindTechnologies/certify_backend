@@ -1,0 +1,29 @@
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.log
+.env.local
+
+# Python / FastAPI
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Env files
+.env
+
+# Storage (uploaded/generated files) — keep folder structure only
+backend/storage/uploads/*
+backend/storage/certificates/*
+backend/storage/qrcodes/*
+backend/storage/templates/*
+backend/storage/signatures/*
+!backend/storage/**/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

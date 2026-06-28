@@ -1,0 +1,218 @@
+from datetime import datetime
+from pathlib import Path
+import tempfile
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user, require_college_admin, require_super_admin
+from app.core.config import settings
+from app.db.database import get_db
+from app.models.models import (
+    Certificate,
+    Enrollment,
+    CertificateTemplate,
+    Signature,
+    VerificationStatus,
+    User,
+    UserRole,
+)
+from app.schemas.schemas import CertificateOut, CertificateRevokeRequest
+from app.services.audit import record
+from app.services.certificate_job import generate_pending_certificates, render_certificate_for_enrollment
+
+router = APIRouter(prefix="/certificates", tags=["certificates"])
+
+
+@router.get("", response_model=list[CertificateOut])
+def list_certificates(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    query = db.query(Certificate).join(Enrollment)
+    if user.role == UserRole.COLLEGE_ADMIN:
+        query = query.filter(Enrollment.college_id == user.college_id)
+    elif user.role == UserRole.STUDENT:
+        from app.models.models import Student
+
+        query = query.join(Student).filter(Student.user_id == user.id)
+    total = query.count()
+    items = query.order_by(Certificate.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return JSONResponse(content=jsonable_encoder(items), headers={"X-Total-Count": str(total)})
+
+
+@router.post("/generate-pending")
+def trigger_generation(user: User = Depends(require_super_admin)):
+    """Manually trigger the scheduled certificate-generation job (also runs automatically)."""
+    count = generate_pending_certificates()
+    return {"generated": count}
+
+
+@router.get("/preview/{enrollment_id}")
+def preview_certificate(
+    enrollment_id: str, db: Session = Depends(get_db), user: User = Depends(require_college_admin)
+):
+    """Renders a certificate for this enrollment using its current data and
+    whatever template/signature is active, without creating a Certificate
+    record. Lets an admin see exactly what will be generated before
+    approving — nothing here is saved or counted as issued."""
+    enrollment = db.query(Enrollment).filter(Enrollment.id == enrollment_id).first()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    if user.role == UserRole.COLLEGE_ADMIN and enrollment.college_id != user.college_id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = tmp.name
+    render_certificate_for_enrollment(
+        db, enrollment, tmp_path, certificate_id="preview", issue_date=datetime.utcnow().date().isoformat()
+    )
+    return FileResponse(tmp_path, media_type="application/pdf", filename="certificate_preview.pdf")
+
+
+@router.get("/{certificate_id}/download")
+def download_certificate(certificate_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    cert = db.query(Certificate).filter(Certificate.id == certificate_id).first()
+    if not cert or not cert.pdf_path:
+        raise HTTPException(status_code=404, detail="Certificate PDF not available")
+    full_path = Path(settings.LOCAL_STORAGE_PATH) / cert.pdf_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="Certificate file missing on storage")
+    return FileResponse(full_path, media_type="application/pdf", filename=f"{certificate_id}.pdf")
+
+
+@router.post("/{certificate_id}/revoke", response_model=CertificateOut)
+def revoke_certificate(
+    certificate_id: str,
+    payload: CertificateRevokeRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super_admin),
+):
+    cert = db.query(Certificate).filter(Certificate.id == certificate_id).first()
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+
+    old_value = {"verification_status": cert.verification_status.value}
+    cert.verification_status = VerificationStatus.REVOKED
+    cert.revoked_at = datetime.utcnow()
+    cert.revoked_reason = payload.reason
+    db.commit()
+
+    record(db, user.id, "CERTIFICATE_REVOKED", "Certificate", cert.id, old_value, {"reason": payload.reason})
+    return cert
+
+
+# ---------------------------------------------------------------------------
+# Certificate templates
+# ---------------------------------------------------------------------------
+@router.get("/templates/list")
+def list_templates(db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    templates = db.query(CertificateTemplate).order_by(CertificateTemplate.created_at.desc()).all()
+    return [
+        {"id": t.id, "name": t.name, "is_active": t.is_active, "file_path": t.file_path}
+        for t in templates
+    ]
+
+
+@router.post("/templates/upload")
+def upload_template(
+    name: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super_admin),
+):
+    relative_path = f"templates/{file.filename}"
+    full_path = Path(settings.LOCAL_STORAGE_PATH) / relative_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_bytes(file.file.read())
+
+    template = CertificateTemplate(name=name, file_path=relative_path, is_active=False)
+    db.add(template)
+    db.commit()
+    record(db, user.id, "TEMPLATE_UPLOADED", "CertificateTemplate", template.id, None, {"name": name})
+    return {"id": template.id, "name": template.name}
+
+
+@router.post("/templates/{template_id}/activate")
+def activate_template(template_id: str, db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    db.query(CertificateTemplate).update({CertificateTemplate.is_active: False})
+    template = db.query(CertificateTemplate).filter(CertificateTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    template.is_active = True
+    db.commit()
+    record(db, user.id, "TEMPLATE_ACTIVATED", "CertificateTemplate", template.id)
+    return {"message": "Template activated"}
+
+
+@router.post("/templates/{template_id}/deactivate")
+def deactivate_template(template_id: str, db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    template = db.query(CertificateTemplate).filter(CertificateTemplate.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    template.is_active = False
+    db.commit()
+    record(db, user.id, "TEMPLATE_DEACTIVATED", "CertificateTemplate", template.id)
+    return {"message": "Template deactivated"}
+
+
+# ---------------------------------------------------------------------------
+# Authorized signature
+# ---------------------------------------------------------------------------
+@router.post("/signature/upload")
+def upload_signature(
+    label: str = "Authorized Signatory",
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super_admin),
+):
+    relative_path = f"signatures/{file.filename}"
+    full_path = Path(settings.LOCAL_STORAGE_PATH) / relative_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_bytes(file.file.read())
+
+    db.query(Signature).update({Signature.is_active: False})
+    signature = Signature(label=label, image_path=relative_path, is_active=True)
+    db.add(signature)
+    db.commit()
+    record(db, user.id, "SIGNATURE_UPDATED", "Signature", signature.id, None, {"label": label})
+    return {"id": signature.id, "label": signature.label}
+
+
+@router.get("/signature/list")
+def list_signatures(db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    signatures = db.query(Signature).order_by(Signature.created_at.desc()).all()
+    return [
+        {"id": s.id, "label": s.label, "is_active": s.is_active, "image_path": s.image_path}
+        for s in signatures
+    ]
+
+
+@router.get("/signature/{signature_id}/preview")
+def preview_signature(signature_id: str, db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    signature = db.query(Signature).filter(Signature.id == signature_id).first()
+    if not signature:
+        raise HTTPException(status_code=404, detail="Signature not found")
+    full_path = Path(settings.LOCAL_STORAGE_PATH) / signature.image_path
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail="Signature file missing on storage")
+    return FileResponse(full_path)
+
+
+@router.post("/signature/{signature_id}/activate")
+def activate_signature(signature_id: str, db: Session = Depends(get_db), user: User = Depends(require_super_admin)):
+    """Activates a previously-uploaded signature without re-uploading it.
+    Only one signature is ever active at a time — every future certificate
+    uses whichever one is active when it's generated."""
+    signature = db.query(Signature).filter(Signature.id == signature_id).first()
+    if not signature:
+        raise HTTPException(status_code=404, detail="Signature not found")
+    db.query(Signature).update({Signature.is_active: False})
+    signature.is_active = True
+    db.commit()
+    record(db, user.id, "SIGNATURE_ACTIVATED", "Signature", signature.id)
+    return {"message": "Signature activated"}
