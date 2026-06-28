@@ -1,5 +1,4 @@
 """add training_type to enrollments and migrate legacy batch schema
-
 Revision ID: 0004_add_training_type_to_enrollments
 Revises: 0003_aicte_internship_id
 Create Date: 2026-06-26
@@ -14,6 +13,9 @@ depends_on = None
 
 
 def upgrade():
+    # Create enum type first
+    op.execute("CREATE TYPE trainingtype AS ENUM ('INTERNSHIP', 'INDUSTRIAL_TRAINING')")
+
     op.add_column(
         "enrollments",
         sa.Column(
@@ -23,7 +25,6 @@ def upgrade():
             server_default="INTERNSHIP",
         ),
     )
-
     op.add_column(
         "enrollments",
         sa.Column("course_id", sa.String(36), sa.ForeignKey("courses.id"), nullable=True),
@@ -32,7 +33,6 @@ def upgrade():
         "enrollments",
         sa.Column("college_id", sa.String(36), sa.ForeignKey("colleges.id"), nullable=True),
     )
-
     op.execute(
         """
         DO $$
@@ -53,10 +53,8 @@ def upgrade():
         $$;
         """
     )
-
     op.alter_column("enrollments", "course_id", nullable=False)
     op.alter_column("enrollments", "college_id", nullable=False)
-
     op.execute(
         """
         DO $$
@@ -94,7 +92,6 @@ def downgrade():
         $$;
         """
     )
-
     op.execute(
         """
         DO $$
@@ -115,8 +112,8 @@ def downgrade():
         $$;
         """
     )
-
     op.alter_column("enrollments", "batch_id", nullable=True)
     op.drop_column("enrollments", "college_id")
     op.drop_column("enrollments", "course_id")
     op.drop_column("enrollments", "training_type")
+    op.execute("DROP TYPE trainingtype")
