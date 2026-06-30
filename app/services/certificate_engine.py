@@ -69,10 +69,6 @@ BUILTIN_LAYOUT = {
     "min_footer_y": 46,
 }
 
-# Calibrated against the June 24 revision of Pixelwind's branded template —
-# the one with NO baked-in "ID:" line, "INTERNSHIP ID:" line, or QR
-# placeholder. All values are FRACTIONS of page width/height (0-1, y from
-# top) so they hold regardless of what size we render the page at.
 CUSTOM_BG_LAYOUT = {
     "id_label": {"fx": 0.330, "fy": 0.100, "size": 18},
     "id_value": {"fx": 0.375, "fy": 0.100, "size": 18, "min_size": 10},
@@ -91,7 +87,6 @@ CUSTOM_BG_LAYOUT = {
 
 
 def fit_font_size(text: str, font: str, max_width: float, start_size: float, min_size: float = 14) -> float:
-    """Shrinks font size in 0.5pt steps until a single line of `text` fits max_width."""
     size = start_size
     while size > min_size and stringWidth(text, font, size) > max_width:
         size -= 0.5
@@ -99,7 +94,6 @@ def fit_font_size(text: str, font: str, max_width: float, start_size: float, min
 
 
 def wrap_lines(text: str, font: str, size: float, max_width: float) -> list[str]:
-    """Greedy word-wrap of `text` into lines that each fit within max_width."""
     lines: list[str] = []
     for paragraph in text.split("\n"):
         words = paragraph.split()
@@ -146,7 +140,6 @@ def _draw_centered_with_bold_span(c, text, bold_span, x, y, normal_font, bold_fo
 
 
 def _draw_centered_with_spans(c, text, x, y, normal_font, size, spans, normal_color=INK_SOFT):
-    """Segmented renderer — each character drawn exactly once, no overdraw."""
     marked: list[tuple[int, int, str, str, tuple]] = []
     for span_text, span_font, span_color in spans:
         if not span_text:
@@ -224,11 +217,6 @@ def _training_label(training_type: str | None) -> str:
 
 
 def _build_sentence(course_name, admission_date, relieving_date, performance_grade, possessive, issuer_label, training_type=None):
-    """Three hard-wrapped lines:
-    Line 1: Successfully completed {possessive} {training_label} in "course" from
-    Line 2: "start to end" in {issuer_part}
-    Line 3: and achieved Performance Grade “{grade}”.   (skipped when no grade)
-    """
     start_disp = _display_date(admission_date)
     end_disp = _display_date(relieving_date)
 
@@ -244,7 +232,7 @@ def _build_sentence(course_name, admission_date, relieving_date, performance_gra
 
     grade = str(performance_grade).strip() if performance_grade and str(performance_grade).strip() else None
     if grade:
-        return f"{line1}\n{line2}\nand achieved Performance Grade “{grade}”."
+        return f"{line1}\n{line2}\nand achieved Performance Grade \u201c{grade}\u201d."
     else:
         return f"{line1}\n{line2}."
 
@@ -340,7 +328,6 @@ def _render_builtin(c, ctx, layout):
         body_size -= 0.5
         lines = wrap_lines(sentence, body_font, body_size, layout["body_max_width"])
 
-    # line_height = exactly the font size — zero extra leading between lines
     line_height = body_size
     body_y = cursor_y - 9
     start_disp = _display_date(ctx["admission_date"])
@@ -385,7 +372,7 @@ def _render_custom_bg(c, ctx, page_w, page_h, layout):
     issuer_label = (settings.ISSUER_NAME or "Pixelwind Technologies").replace("Pixel Wind", "Pixelwind")
     relation, possessive = _pronoun(ctx["gender"])
 
-    # --- "ID:" label + our own internship_id value -------------------------
+    # --- "ID:" label + internship_id value --------------------------------
     id_text = _format_internship_display_id(ctx["internship_id"])
     if id_text:
         idv = layout["id_value"]
@@ -393,16 +380,14 @@ def _render_custom_bg(c, ctx, page_w, page_h, layout):
         id_size = fit_font_size(f"ID: {id_text}", "Helvetica-Bold", id_max_w, idv["size"] - 2, min_size=idv["min_size"])
         _draw_centered(c, f"ID: {id_text}", page_w / 2, page_h * (1 - idv["fy"]) - 24, "Helvetica-Bold", id_size, color=INK)
 
-    # --- Student name ------------------------------------------------------
+    # --- Student name -----------------------------------------------------
     name_cfg = layout["name"]
     name_text = ctx["student_name"].upper()
     name_size = fit_font_size(name_text, "Helvetica-Bold", page_w * 0.56, name_cfg["size"], min_size=name_cfg["min_size"])
     name_y = page_h * (1 - name_cfg["fy"]) + 8
     _draw_centered(c, name_text, page_w / 2, name_y, "Helvetica-Bold", name_size, color=NAME_TEAL)
 
-    # --- Body sentence — S/o./D/o. flows directly into it, single anchor ---
-    # Each \n-separated line must fit on EXACTLY ONE printed line — no word
-    # wrap. We shrink the shared font size until every line fits within max_w.
+    # --- Body sentence ----------------------------------------------------
     sub_cfg = layout["subline"]
     body_font = "Times-Roman"
     body_size = 26
@@ -417,15 +402,12 @@ def _render_custom_bg(c, ctx, page_w, page_h, layout):
         grade_value, possessive, issuer_label, ctx.get("training_type"),
     )
 
-    # Split on the hard \n breaks only — no further wrapping.
     lines = [l for l in sentence.split("\n") if l]
     while body_size > 10 and any(stringWidth(line, body_font, body_size) > max_w for line in lines):
         body_size -= 0.5
 
-    # Tight leading — comfortable but not airy
     line_height = body_size * 1.1
 
-    # Small gap between the name underline and S/o./D/o. line
     cursor_y = page_h * (1 - sub_cfg["fy"]) - 8
     if ctx["father_name"]:
         _draw_centered(c, f"{relation} {ctx['father_name']}", page_w / 2, cursor_y, "Times-Roman", body_size, color=INK)
@@ -449,7 +431,7 @@ def _render_custom_bg(c, ctx, page_w, page_h, layout):
             _draw_centered(c, line, page_w / 2, body_y, body_font, body_size, color=INK)
         body_y -= line_height
 
-    # --- QR code -----------------------------------------------------------
+    # --- QR code ----------------------------------------------------------
     qr_cfg = layout["qr"]
     if ctx["qr_code_path"] and os.path.exists(ctx["qr_code_path"]):
         size = qr_cfg["size_frac"] * page_w
@@ -459,11 +441,12 @@ def _render_custom_bg(c, ctx, page_w, page_h, layout):
             width=size, height=size, preserveAspectRatio=True, mask="auto",
         )
 
-    # --- AICTE Internship ID -----------------------------------------------
+    # --- AICTE Internship ID ----------------------------------------------
     if ctx["aicte_internship_id"]:
         iidl = layout["internship_label"]
+        # ✅ FIXED: was empty string "" before
         _draw_left(
-            c, "", iidl["fx"] * page_w, page_h * (1 - iidl["fy"]),
+            c, "AICTE Internship ID:", iidl["fx"] * page_w, page_h * (1 - iidl["fy"]),
             "Helvetica-Bold", iidl["size"], color=AICTE_RED,
         )
         iidv = layout["internship_id_value"]
